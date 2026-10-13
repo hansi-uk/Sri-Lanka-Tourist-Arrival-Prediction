@@ -1,6 +1,7 @@
 """Sri Lankan tourist arrival trend classifier: Streamlit interface."""
 
 from pathlib import Path
+import base64
 import pickle
 
 import pandas as pd
@@ -12,12 +13,102 @@ MONTHS = [
     "July", "August", "September", "October", "November", "December",
 ]
 MODEL_FILE = Path(__file__).with_name("tourist_trend_model.pkl")
+BACKGROUND_FILE = Path(__file__).with_name("sri_lanka_background.jpg")
 
 st.set_page_config(
     page_title="Sri Lanka Tourist Arrival Trends",
     page_icon="🇱🇰",
-    layout="centered",
+    layout="wide",
 )
+
+
+
+def style_page():
+    """Apply travel-inspired colors and the supplied Sri Lankan photo."""
+    background = "linear-gradient(120deg, #073a49, #175b68 58%, #26735b)"
+    if BACKGROUND_FILE.exists():
+        encoded = base64.b64encode(BACKGROUND_FILE.read_bytes()).decode("ascii")
+        background = (
+            "linear-gradient(135deg, rgba(5, 22, 38, 0.56), "
+            "rgba(5, 36, 46, 0.56)), "
+            f"url('data:image/jpeg;base64,{encoded}')"
+        )
+
+    st.markdown(
+        "<style>" + """
+        /* Tourism photo and subdued overlay across the entire app */
+        .stApp {
+            background-image: BACKGROUND_PLACEHOLDER;
+            background-size: cover;
+            background-position: center center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+        }
+        [data-testid="stHeader"],
+        [data-testid="stAppViewContainer"],
+        [data-testid="stBottomBlockContainer"] {
+            background: transparent;
+        }
+        /* Translucent content surface keeps the photo visible but text legible */
+        [data-testid="stMainBlockContainer"] {
+            max-width: 960px;
+            margin: 30px auto 54px;
+            padding: 2.6rem 3.0rem 3.3rem;
+            background: rgba(250, 253, 255, 0.94);
+            border: 1px solid rgba(255, 255, 255, 0.7);
+            border-radius: 26px;
+            box-shadow: 0 20px 70px rgba(2, 22, 38, 0.32);
+            backdrop-filter: blur(9px);
+            -webkit-backdrop-filter: blur(9px);
+        }
+        [data-testid="stMainBlockContainer"] h1,
+        [data-testid="stMainBlockContainer"] h2,
+        [data-testid="stMainBlockContainer"] h3 {
+            color: #083d52;
+            letter-spacing: -0.02em;
+        }
+        [data-testid="stMainBlockContainer"] h1 {
+            font-size: clamp(2rem, 3.5vw, 3rem);
+        }
+        [data-testid="stMainBlockContainer"] p,
+        [data-testid="stMainBlockContainer"] label {
+            color: #193849;
+        }
+        [data-testid="stForm"] {
+            background: rgba(232, 247, 245, 0.76);
+            border: 1px solid rgba(25, 139, 129, 0.27);
+            border-radius: 20px;
+            padding: 24px;
+        }
+        [data-testid="stFormSubmitButton"] button {
+            background: linear-gradient(100deg, #098c76, #1177a8);
+            color: white;
+            border: none;
+            font-weight: 700;
+            border-radius: 12px;
+            min-height: 2.9rem;
+            padding: 0.7rem 1.5rem;
+            box-shadow: 0 7px 18px rgba(2, 97, 115, 0.2);
+        }
+        [data-testid="stFormSubmitButton"] button:hover {
+            color: white;
+            border: none;
+            background: linear-gradient(100deg, #057463, #115f90);
+        }
+        @media (max-width: 700px) {
+            [data-testid="stMainBlockContainer"] {
+                margin: 12px 9px 28px;
+                padding: 1.4rem 1rem 1.8rem;
+                border-radius: 16px;
+            }
+            [data-testid="stForm"] { padding: 12px; }
+        }
+        """.replace("BACKGROUND_PLACEHOLDER", background) + "</style>",
+        unsafe_allow_html=True,
+    )
+
+
+style_page()
 
 
 @st.cache_resource

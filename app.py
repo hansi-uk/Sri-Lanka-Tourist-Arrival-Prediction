@@ -14,6 +14,7 @@ MONTHS = [
 ]
 MODEL_FILE = Path(__file__).with_name("tourist_trend_model.pkl")
 BACKGROUND_FILE = Path(__file__).with_name("sri_lanka_background.jpg")
+DATA_FILE = Path(__file__).with_name("Sri_Lanka_Tourist_Arrivals_2022_2026.csv")
 
 st.set_page_config(
     page_title="Sri Lanka Tourist Arrival Trends",
@@ -108,18 +109,94 @@ def style_page():
     )
 
 
+
 style_page()
 
 
 @st.cache_resource
 def load_model_bundle():
-    # Only load model files created by you or from a source you trust.
+    # Pickle is safe to open only when you trust who created the file.
     with MODEL_FILE.open("rb") as file:
         bundle = pickle.load(file)
     required = {"model", "feature_columns", "class_labels"}
     if not isinstance(bundle, dict) or not required.issubset(bundle):
-        raise ValueError("Unexpected model bundle structure")
+        raise ValueError("Unexpected saved model bundle")
     return bundle
+
+
+@st.cache_data(show_spinner=False)
+def load_arrival_history():
+    """Replicate the notebook's cleaning and index months by country.
+
+    Automatic mode only offers dates for which the current and three
+    immediately preceding calendar months are all present in the CSV.
+    """
+    raw = pd.read_csv(DATA_FILE)
+    required = {"Year", "Country", "Month", "Arrivals"}
+    if not required.issubset(raw.columns):
+        raise ValueError("Tourism CSV is missing expected columns")
+
+    data = raw.copy()
+    data["Arrivals"] = pd.to_numeric(data["Arrivals"], errors="coerce")
+    data = data.dropna(subset=["Arrivals"]).copy()
+    data = data.drop_duplicates(subset=["Year", "Country", "Month"])
+    data = data[data["Year"] >= 2023].copy()
+    mapping = {month: number for number, month in enumerate(MONTHS, start=1)}
+    data["MonthNum"] = data["Month"].map(mapping)
+    data = data.dropna(subset=["MonthNum"]).copy()
+    data["PeriodIndex"] = data["Year"].astype(int) * 12 + data["MonthNum"].astype(int)
+
+    lookup = {
+        (str(record.Country), int(record.PeriodIndex)): int(record.Arrivals)
+        for record in data[["Country", "PeriodIndex", "Arrivals"]].itertuples(index=False)
+    }
+    eligible = {}
+    for country, country_rows in data.groupby("Country"):
+        available = set(country_rows["PeriodIndex"].astype(int).tolist())
+        good_months = sorted(
+            period for period in available
+            if all((period - lag) in available for lag in (1, 2, 3))
+        )
+        if good_months:
+            eligible[str(country)] = good_months
+
+    return lookup, eligible
+
+
+def month_label(period_index):
+    """Convert the continuous month index back to a readable month/year."""
+    year, zero_month = divmod(int(period_index) - 1, 12)
+    return f"{MONTHS[zero_month]} {year}"
+
+
+def predict(model, expected_columns, country, year, month_number, arrivals):
+    """Build the *exact* numeric features used during model training."""
+    current, previous_1, previous_2, previous_3 = map(int, arrivals)
+    row = {column: 0 for column in expected_columns}
+    values = {
+        "Year": int(year),
+        "MonthNum": int(month_number),
+        "Arrivals": current,
+        "Lag1_Arrivals": previous_1,
+        "Lag2_Arrivals": previous_2,
+        "Lag3_Arrivals": previous_3,
+        "ChangeLastMonth": current - previous_1,
+        "MeanLast3Months": (current + previous_1 + previous_2) / 3,
+    }
+    for key, value in values.items():
+        if key in row:
+            row[key] = value
+
+    country_column = f"Country_{country}"
+    if country_column not in row:
+        raise ValueError("This country was not represented during model training")
+    row[country_column] = 1
+
+    observation = pd.DataFrame([row], columns=expected_columns)
+    category = int(model.predict(observation)[0])
+    class_ids = list(model.classes_)
+    proba = float(model.predict_proba(observation)[0][class_ids.index(1)])
+    return category, proba
 
 
 st.title("🇱🇰 Tourist Arrival Trend Predictor")
@@ -135,82 +212,130 @@ st.caption(
 try:
     bundle = load_model_bundle()
 except FileNotFoundError:
-    st.error(
-        "Model file not found. Place `tourist_trend_model.pkl` "
-        "in the same folder as `app.py`."
-    )
+    st.error("Model file not found. Place `tourist_trend_model.pkl` next to `app.py`.")
     st.stop()
 except Exception as exc:
-    st.error(
-        "The saved model could not be loaded. Check that this Python environment "
-        "uses compatible versions of scikit-learn and its dependencies."
-    )
+    st.error("Could not load the model. Check the scikit-learn dependency version.")
     st.exception(exc)
     st.stop()
 
 model = bundle["model"]
-feature_columns = bundle["feature_columns"]
+expected_columns = bundle["feature_columns"]
 labels = bundle["class_labels"]
-
-country_columns = [col for col in feature_columns if col.startswith("Country_")]
-countries = sorted(col[len("Country_"):] for col in country_columns)
-if not countries:
-    st.error("No country feature columns were found in the model bundle.")
+model_countries = sorted(
+    col[len("Country_"):] for col in expected_columns
+    if col.startswith("Country_")
+)
+if not model_countries:
+    st.error("The trained model doesn't contain any country columns.")
     st.stop()
 
-st.subheader("Enter monthly arrival data")
-with st.form("trend_prediction_form"):
-    country = st.selectbox("Country of origin", countries)
-    year = int(st.number_input("Current month's year", min_value=2023, max_value=2030, value=2026, step=1))
-    month = st.selectbox("Current month", MONTHS, index=4)
+lookup = {}
+eligible = {}
+if DATA_FILE.is_file():
+    try:
+        lookup, eligible = load_arrival_history()
+    except Exception as exc:
+        st.warning("Historical arrivals could not be loaded. Manual entry is still available.")
+        st.caption(str(exc))
+else:
+    st.warning("Historical CSV not found. Upload it to GitHub for automatic lookup.")
 
-    st.write("**Tourist arrivals in four consecutive months**")
-    current = int(st.number_input("Current month", min_value=0, value=0, step=1))
-    previous_1 = int(st.number_input("Previous month", min_value=0, value=0, step=1))
-    previous_2 = int(st.number_input("Two months ago", min_value=0, value=0, step=1))
-    previous_3 = int(st.number_input("Three months ago", min_value=0, value=0, step=1))
-    st.caption("Enter actual arrival counts. A value of 0 means zero arrivals, not missing data.")
+eligible_countries = sorted(set(model_countries).intersection(eligible))
+mode_options = ["Automatic — use dataset", "Manual — enter arrivals"] if eligible_countries else ["Manual — enter arrivals"]
 
-    submitted = st.form_submit_button("Predict next-month trend", type="primary")
+st.subheader("Select a country and month")
+mode = st.radio(
+    "Where should arrival figures come from?",
+    options=mode_options,
+    horizontal=True,
+    help="Automatic mode looks up the current and preceding three months in the CSV. "
+         "Manual mode is useful for newer months not in the dataset.",
+)
+
+if mode.startswith("Automatic"):
+    countries = eligible_countries
+else:
+    countries = model_countries
+preferred_country = "India" if "India" in countries else countries[0]
+country = st.selectbox(
+    "Country of origin",
+    countries,
+    index=countries.index(preferred_country),
+)
+
+if mode.startswith("Automatic"):
+    period_options = eligible[country]
+    years = sorted({(p - 1) // 12 for p in period_options}, reverse=True)
+    year = int(st.selectbox("Current month's year", years))
+    month_numbers = sorted(
+        [((p - 1) % 12) + 1 for p in period_options if (p - 1) // 12 == year],
+        reverse=True,
+    )
+    selected_month_num = int(st.selectbox(
+        "Current month",
+        month_numbers,
+        format_func=lambda number: MONTHS[number - 1],
+    ))
+    period = year * 12 + selected_month_num
+    four_counts = [lookup[(country, period - offset)] for offset in range(4)]
+
+    st.info("The four consecutive months of arrival data will be filled automatically from the uploaded dataset.")
+    with st.form("trend_prediction_form"):
+        st.write("**Historical arrivals used by the model**")
+        preview = pd.DataFrame({
+            "Month": [month_label(period - lag) for lag in (0, 1, 2, 3)],
+            "Tourist arrivals": four_counts,
+        })
+        st.dataframe(preview, hide_index=True, use_container_width=True)
+        st.caption(
+            "Source: uploaded Sri Lankan tourism CSV. Historical data are not updated live. "
+            "Choose manual mode for newer observations."
+        )
+        submitted = st.form_submit_button("Predict next-month trend", type="primary")
+else:
+    year = int(st.number_input(
+        "Current month's year", min_value=2023, max_value=2030, value=2026, step=1,
+    ))
+    selected_month_num = MONTHS.index(st.selectbox("Current month", MONTHS, index=4)) + 1
+
+    with st.form("trend_prediction_form"):
+        st.write("**Tourist arrivals in four consecutive months**")
+        current = int(st.number_input("Current month", min_value=0, value=0, step=1))
+        previous_1 = int(st.number_input("Previous month", min_value=0, value=0, step=1))
+        previous_2 = int(st.number_input("Two months ago", min_value=0, value=0, step=1))
+        previous_3 = int(st.number_input("Three months ago", min_value=0, value=0, step=1))
+        four_counts = [current, previous_1, previous_2, previous_3]
+        st.caption(
+            "Enter actual tourist arrival counts. A zero means zero arrivals, not missing data. "
+            "Use the months immediately preceding your selected month, including across year boundaries."
+        )
+        submitted = st.form_submit_button("Predict next-month trend", type="primary")
 
 if submitted:
-    month_num = MONTHS.index(month) + 1
-    # The trained feature matrix contains a one-hot column for each known country.
-    # Start with zeroes, then populate the same numeric features used in training.
-    row = {column: 0 for column in feature_columns}
-    values = {
-        "Year": year,
-        "MonthNum": month_num,
-        "Arrivals": current,
-        "Lag1_Arrivals": previous_1,
-        "Lag2_Arrivals": previous_2,
-        "Lag3_Arrivals": previous_3,
-        "ChangeLastMonth": current - previous_1,
-        "MeanLast3Months": (current + previous_1 + previous_2) / 3,
-    }
-    for name, value in values.items():
-        if name in row:
-            row[name] = value
-    row[f"Country_{country}"] = 1
+    try:
+        category, prob_increase = predict(
+            model, expected_columns, country, year, selected_month_num, four_counts
+        )
+    except Exception as exc:
+        st.error("Unable to generate the prediction from these inputs.")
+        st.exception(exc)
+        st.stop()
 
-    sample = pd.DataFrame([row], columns=feature_columns)
-    prediction = int(model.predict(sample)[0])
-    class_ids = list(model.classes_)
-    probabilities = model.predict_proba(sample)[0]
-    increase_probability = float(probabilities[class_ids.index(1)])
+    next_month_num = selected_month_num % 12 + 1
+    next_year = year + (selected_month_num == 12)
+    next_label = f"{MONTHS[next_month_num - 1]} {next_year}"
+    predicted_label = labels.get(category, labels.get(str(category), str(category)))
 
-    target_month = MONTHS[month_num % 12]
-    target_year = year + (month_num == 12)
-
-    st.subheader(f"Prediction for {target_month} {target_year}")
-    predicted_label = labels.get(prediction, labels.get(str(prediction), str(prediction)))
-    if prediction == 1:
+    st.subheader(f"Prediction for {next_label}")
+    if category == 1:
         st.success(f"Predicted trend: **{predicted_label}**")
     else:
         st.info(f"Predicted trend: **{predicted_label}**")
-    st.metric("Estimated probability of increase", f"{increase_probability:.1%}")
-    st.progress(increase_probability)
+    st.metric("Estimated probability of increase", f"{prob_increase:.1%}")
+    st.progress(prob_increase)
     st.caption(
-        "These are uncalibrated model probabilities. The model had limited performance "
-        "on its 2026 holdout test set; results are for educational demonstration."
+        "These are uncalibrated model probabilities. The classifier showed limited performance "
+        "on its 2026 held-out test set, so results are for educational demonstration only."
     )
+
